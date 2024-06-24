@@ -67,6 +67,8 @@ func main() {
 		errorOnReplace         bool
 		regexMatch             bool
 		headerUsesListSyntax   bool
+		oidcClientId           string
+		oidcIssuer             string
 	)
 
 	flagset := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -86,6 +88,8 @@ func main() {
 	flagset.BoolVar(&errorOnReplace, "error-on-replace", false, "When specified, the proxy will return HTTP status code 400 if the query already contains a label matcher that differs from the one the proxy would inject.")
 	flagset.BoolVar(&regexMatch, "regex-match", false, "When specified, the tenant name is treated as a regular expression. In this case, only one tenant name should be provided.")
 	flagset.BoolVar(&headerUsesListSyntax, "header-uses-list-syntax", false, "When specified, the header line value will be parsed as a comma-separated list. This allows a single tenant header line to specify multiple tenant names.")
+	flagset.StringVar(&oidcClientId, "oidc-client-id", "", "The Clien ID of the oidc issuer.")
+	flagset.StringVar(&oidcIssuer, "oidc-issuer", "", "The URL for the OIDC issuer.")
 
 	//nolint: errcheck // Parse() will exit on error.
 	flagset.Parse(os.Args[1:])
@@ -93,7 +97,7 @@ func main() {
 		log.Fatalf("-label flag cannot be empty")
 	}
 
-	if len(labelValues) == 0 && queryParam == "" && headerName == "" {
+	if len(labelValues) == 0 && queryParam == "" && headerName == "" && (oidcClientId == "" || oidcIssuer == "") {
 		queryParam = label
 	}
 
@@ -162,6 +166,8 @@ func main() {
 		extractLabeler = injectproxy.HTTPFormEnforcer{ParameterName: queryParam}
 	case headerName != "":
 		extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
+	case (oidcClientId != "" && oidcIssuer != ""):
+		extractLabeler = injectproxy.OIDCTokenEnforcer{ClientID: oidcClientId, Issuer: oidcIssuer}
 	}
 
 	var g run.Group

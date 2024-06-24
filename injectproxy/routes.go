@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/efficientgo/core/merrors"
 	"github.com/metalmatze/signal/server/signalhttp"
 	"github.com/prometheus/client_golang/prometheus"
@@ -275,6 +276,50 @@ type StaticLabelEnforcer []string
 func (sle StaticLabelEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next(w, r.WithContext(WithLabelValues(r.Context(), sle)))
+	})
+}
+
+type OIDCTokenEnforcer struct {
+	ClientID string
+	Issuer   string
+}
+
+func (ote OIDCTokenEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler {
+	labelValues := []string{}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provider, err := oidc.NewProvider(r.Context(), ote.Issuer)
+		if err != nil {
+			prometheusAPIError(w, humanFriendlyErrorMessage(err), http.StatusInternalServerError)
+		}
+
+		verifier := provider.Verifier(&oidc.Config{ClientID: ote.ClientID})
+
+		token := r.Header.Get("X-Id-Token")
+		if token == "" {
+			prometheusAPIError(w, "Authorization header missing", http.StatusUnauthorized)
+			return
+		}
+
+		// Verify the ID token
+		idToken, err := verifier.Verify(r.Context(), token)
+		if err != nil {
+			prometheusAPIError(w, fmt.Sprintf("Failed to verify ID token: %v", err), http.StatusUnauthorized)
+			return
+		}
+
+		// Print token claims
+		var claims map[string]interface{}
+		if err := idToken.Claims(&claims); err != nil {
+			prometheusAPIError(w, fmt.Sprintf("Failed to parse ID token claims: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		if len(labelValues) < 1 {
+			prometheusAPIError(w, "User is not mapped to any tenants.", http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r.WithContext(WithLabelValues(r.Context(), labelValues)))
 	})
 }
 
