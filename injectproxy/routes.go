@@ -19,10 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,6 +35,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -280,11 +284,40 @@ func (sle StaticLabelEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler 
 }
 
 type OIDCTokenEnforcer struct {
-	ClientID string
-	Issuer   string
+	ClientID   string
+	Issuer     string
+	ConfigPath string
+}
+
+type OIDCConfig struct {
+	Tenants []Tenant `yaml:"tenants"`
+}
+
+func (c *OIDCConfig) readOIDCConfig(path string) error {
+	yamlFile, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(yamlFile, c)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+type Tenant struct {
+	Name   string   `yaml:"name"`
+	Groups []string `yaml:"groups"`
+	Users  []string `yaml:"users"`
 }
 
 func (ote OIDCTokenEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler {
+	config := OIDCConfig{}
+	err := config.readOIDCConfig(ote.ConfigPath)
+	if err != nil {
+		log.Printf("Failed to read oidc config, ignoring tenant mapping: %v", err)
+	}
+
 	labelValues := []string{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		provider, err := oidc.NewProvider(r.Context(), ote.Issuer)
@@ -307,11 +340,25 @@ func (ote OIDCTokenEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler {
 			return
 		}
 
-		// Print token claims
-		var claims map[string]interface{}
+		var claims struct {
+			Email  string   `json:"email"`
+			Groups []string `json:"groups"`
+		}
+
 		if err := idToken.Claims(&claims); err != nil {
 			prometheusAPIError(w, fmt.Sprintf("Failed to parse ID token claims: %v", err), http.StatusInternalServerError)
 			return
+		}
+
+		for _, t := range config.Tenants {
+			for _, g := range t.Groups {
+				if slices.Contains(claims.Groups, g) {
+					labelValues = append(labelValues, t.Name)
+				}
+			}
+			if slices.Contains(t.Users, claims.Email) {
+				labelValues = append(labelValues, t.Name)
+			}
 		}
 
 		if len(labelValues) < 1 {

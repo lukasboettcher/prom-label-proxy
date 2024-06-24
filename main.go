@@ -69,6 +69,7 @@ func main() {
 		headerUsesListSyntax   bool
 		oidcClientId           string
 		oidcIssuer             string
+		oidcConfigPath         string
 	)
 
 	flagset := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -90,6 +91,7 @@ func main() {
 	flagset.BoolVar(&headerUsesListSyntax, "header-uses-list-syntax", false, "When specified, the header line value will be parsed as a comma-separated list. This allows a single tenant header line to specify multiple tenant names.")
 	flagset.StringVar(&oidcClientId, "oidc-client-id", "", "The Clien ID of the oidc issuer.")
 	flagset.StringVar(&oidcIssuer, "oidc-issuer", "", "The URL for the OIDC issuer.")
+	flagset.StringVar(&oidcConfigPath, "oidc-config", "", "The path to a config file for mapping tenants to groups.")
 
 	//nolint: errcheck // Parse() will exit on error.
 	flagset.Parse(os.Args[1:])
@@ -167,7 +169,7 @@ func main() {
 	case headerName != "":
 		extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
 	case (oidcClientId != "" && oidcIssuer != ""):
-		extractLabeler = injectproxy.OIDCTokenEnforcer{ClientID: oidcClientId, Issuer: oidcIssuer}
+		extractLabeler = injectproxy.OIDCTokenEnforcer{ClientID: oidcClientId, Issuer: oidcIssuer, ConfigPath: oidcConfigPath}
 	}
 
 	var g run.Group
