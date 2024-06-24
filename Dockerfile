@@ -1,11 +1,12 @@
-ARG ARCH="amd64"
-ARG OS="linux"
-FROM quay.io/prometheus/busybox-${OS}-${ARCH}:glibc
-LABEL maintainer="The Prometheus Authors <prometheus-developers@googlegroups.com>"
+FROM quay.io/prometheus/golang-builder:1.22-base as builder
 
-ARG ARCH="amd64"
-ARG OS="linux"
-COPY .build/${OS}-${ARCH}/prom-label-proxy /bin/prom-label-proxy
+COPY . .
+
+RUN make
+
+FROM quay.io/prometheus/busybox-linux-amd64:glibc
+
+COPY --from=builder  /app/prom-label-proxy /bin/prom-label-proxy
 
 USER        nobody
 ENTRYPOINT  [ "/bin/prom-label-proxy" ]
