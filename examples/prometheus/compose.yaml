@@ -1,6 +1,6 @@
 services:
   prometheus:
-    image: quay.io/prometheus/prometheus:v3.5.0
+    image: quay.io/prometheus/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
     volumes:
