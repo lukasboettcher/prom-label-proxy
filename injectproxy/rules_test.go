@@ -831,7 +831,7 @@ func TestAlertsMultipleLabels(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -893,7 +893,7 @@ func TestRulesMultipleLabelsWithActiveAlerts(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 		WithActiveAlerts(),
 	)
 	if err != nil {
@@ -935,7 +935,7 @@ func TestRulesMultipleLabelMatchers(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 		WithLabelMatchersForRulesAPI(),
 	)
 	if err != nil {

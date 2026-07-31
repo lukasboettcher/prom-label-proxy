@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -47,18 +46,13 @@ func (r *routes) silences(w http.ResponseWriter, req *http.Request) {
 
 // assertSingleLabelValue verifies that each enforced label has only one value.
 // If not, it will reply with "422 Unprocessable Content".
-func assertSingleLabelValue(next http.HandlerFunc) http.HandlerFunc {
+func (r *routes) assertSingleLabelValue(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		if labelValues, ok := req.Context().Value(keyLabels).(map[string][]string); ok {
-			for _, values := range labelValues {
-				if len(values) > 1 {
-					http.Error(w, "Multiple label matchers not supported", http.StatusUnprocessableEntity)
-					return
-				}
+		for _, l := range r.labels {
+			if len(mustLabelValuesFor(req.Context(), l.name)) > 1 {
+				http.Error(w, "Multiple label matchers not supported", http.StatusUnprocessableEntity)
+				return
 			}
-		} else if len(MustLabelValues(req.Context())) > 1 {
-			http.Error(w, "Multiple label matchers not supported", http.StatusUnprocessableEntity)
-			return
 		}
 
 		next(w, req)
@@ -101,8 +95,11 @@ func (r *routes) enforceFilterParameter(w http.ResponseWriter, req *http.Request
 	}
 
 	q["filter"] = modified
-	for _, config := range r.labels {
-		q.Del(config.name)
+	for _, l := range r.labels {
+		q.Del(l.name)
+		if e, ok := l.extractLabeler.(HTTPFormEnforcer); ok {
+			q.Del(e.ParameterName)
+		}
 	}
 	req.URL.RawQuery = q.Encode()
 
@@ -133,8 +130,9 @@ func (r *routes) postSilence(w http.ResponseWriter, req *http.Request) {
 
 	var falsy bool
 	modified := make(models.Matchers, 0, len(r.labels)+len(sil.Matchers))
-	for _, config := range r.labels {
-		name := config.name
+	for _, l := range r.labels {
+		name := l.name
+		// Single value guaranteed by assertSingleLabelValue().
 		value := mustLabelValuesFor(req.Context(), name)[0]
 		modified = append(modified, &models.Matcher{Name: &name, Value: &value, IsRegex: &falsy})
 	}
@@ -216,20 +214,16 @@ func hasMatcherForLabel(matchers models.Matchers, name, value string) bool {
 
 func (r *routes) newAlertmanagerLabelMatchers(ctx context.Context) ([]labels.Matcher, error) {
 	matchers := make([]labels.Matcher, 0, len(r.labels))
-	for _, config := range r.labels {
-		values := mustLabelValuesFor(ctx, config.name)
-		matcher := labels.Matcher{Name: config.name}
+	for _, l := range r.labels {
+		values := mustLabelValuesFor(ctx, l.name)
+		matcher := labels.Matcher{Name: l.name}
 		switch {
 		case r.regexMatch:
 			if len(values) != 1 {
 				return nil, fmt.Errorf("only one label value allowed with regex match")
 			}
-			compiledRegex, err := regexp.Compile(values[0])
-			if err != nil {
-				return nil, fmt.Errorf("invalid regex: %w", err)
-			}
-			if compiledRegex.MatchString("") {
-				return nil, fmt.Errorf("regex should not match empty string")
+			if err := validateRegexValue(l.name, values[0]); err != nil {
+				return nil, err
 			}
 			matcher.Type = labels.MatchRegexp
 			matcher.Value = values[0]
@@ -247,8 +241,8 @@ func (r *routes) newAlertmanagerLabelMatchers(ctx context.Context) ([]labels.Mat
 }
 
 func (r *routes) isEnforcedLabel(name string) bool {
-	for _, config := range r.labels {
-		if config.name == name {
+	for _, l := range r.labels {
+		if l.name == name {
 			return true
 		}
 	}
@@ -256,8 +250,9 @@ func (r *routes) isEnforcedLabel(name string) bool {
 }
 
 func (r *routes) hasEnforcedMatchers(matchers models.Matchers, ctx context.Context) bool {
-	for _, config := range r.labels {
-		if !hasMatcherForLabel(matchers, config.name, mustLabelValuesFor(ctx, config.name)[0]) {
+	for _, l := range r.labels {
+		// Single value guaranteed by assertSingleLabelValue().
+		if !hasMatcherForLabel(matchers, l.name, mustLabelValuesFor(ctx, l.name)[0]) {
 			return false
 		}
 	}

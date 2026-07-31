@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/prometheus/common/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -89,6 +90,7 @@ func (c Config) Validate() error {
 	}
 
 	seen := make(map[string]struct{}, len(c.Labels))
+	seenQueryParams := make(map[string]struct{}, len(c.Labels))
 	for i, l := range c.Labels {
 		if err := l.validate(); err != nil {
 			return fmt.Errorf("labels[%d]: %w", i, err)
@@ -98,14 +100,25 @@ func (c Config) Validate() error {
 			return fmt.Errorf("labels[%d]: label %q is configured more than once", i, l.Name)
 		}
 		seen[l.Name] = struct{}{}
+
+		if l.QueryParam == "" {
+			continue
+		}
+
+		// Sharing a query parameter between labels is rejected because the
+		// extractors strip the parameter from the proxied request as they run.
+		if _, found := seenQueryParams[l.QueryParam]; found {
+			return fmt.Errorf("labels[%d]: query parameter %q is used by more than one label", i, l.QueryParam)
+		}
+		seenQueryParams[l.QueryParam] = struct{}{}
 	}
 
 	return nil
 }
 
 func (l LabelConfig) validate() error {
-	if l.Name == "" {
-		return errors.New("the label name must be set")
+	if !model.UTF8Validation.IsValidLabelName(l.Name) {
+		return fmt.Errorf("invalid label name %q", l.Name)
 	}
 
 	var sources []string
@@ -154,7 +167,7 @@ func (l LabelConfig) extractLabeler() ExtractLabeler {
 func WithConfig(cfg Config) Option {
 	return optionFunc(func(o *options) {
 		for _, l := range cfg.Labels {
-			o.labels = append(o.labels, labelConfig{name: l.Name, extractLabeler: l.extractLabeler()})
+			o.labels = append(o.labels, enforcedLabel{name: l.Name, extractLabeler: l.extractLabeler()})
 		}
 	})
 }

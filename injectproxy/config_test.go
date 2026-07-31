@@ -98,6 +98,21 @@ labels:
 			in:      "labels:\n  - name: namespace\n    query_param: ns\n  - name: namespace\n    query_param: ns2\n",
 			wantErr: true,
 		},
+		{
+			name:    "duplicated query parameter",
+			in:      "labels:\n  - name: namespace\n    query_param: ns\n  - name: cluster\n    query_param: ns\n",
+			wantErr: true,
+		},
+		{
+			name: "duplicated header",
+			in:   "labels:\n  - name: namespace\n    header:\n      name: X-Scope\n  - name: cluster\n    header:\n      name: X-Scope\n",
+			want: &Config{
+				Labels: []LabelConfig{
+					{Name: "namespace", Header: &HeaderConfig{Name: "X-Scope"}},
+					{Name: "cluster", Header: &HeaderConfig{Name: "X-Scope"}},
+				},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseConfig([]byte(tc.in))
@@ -115,6 +130,13 @@ labels:
 				t.Fatalf("expected %+v, got %+v", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidLabelName(t *testing.T) {
+	cfg := Config{Labels: []LabelConfig{{Name: "invalid\xffname", QueryParam: "ns"}}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error, got none")
 	}
 }
 

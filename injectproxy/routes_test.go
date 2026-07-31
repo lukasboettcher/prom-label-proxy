@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -170,33 +171,167 @@ func TestMustLabelValuesDoesNotMutateContext(t *testing.T) {
 	}
 }
 
+// StaticLabelEnforcer shares the same slice across all requests, so the values
+// stored in the context must never be sorted in place.
+func TestStaticLabelEnforcerConcurrentRequests(t *testing.T) {
+	sle := StaticLabelEnforcer([]string{"team-c", "team-b", "team-a"})
+	h := sle.ExtractLabel(func(_ http.ResponseWriter, req *http.Request) {
+		if got := strings.Join(MustLabelValues(req.Context()), ","); got != "team-a,team-b,team-c" {
+			t.Errorf("expected sorted values, got %q", got)
+		}
+	})
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+		}()
+	}
+	wg.Wait()
+
+	if got := strings.Join(sle, ","); got != "team-c,team-b,team-a" {
+		t.Fatalf("the enforcer's values were mutated: %q", got)
+	}
+}
+
+// With several enforced labels, the legacy single-label context value is
+// ambiguous and must not be readable.
+func TestMustLabelValuesUnavailableWithMultipleLabels(t *testing.T) {
+	var recovered any
+	m := newMockUpstream(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(okResponse)
+	}))
+	defer m.Close()
+
+	r, err := NewRoutes(
+		m.url,
+		proxyLabel,
+		HTTPFormEnforcer{ParameterName: proxyLabel},
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	handler := r.extractLabels(func(_ http.ResponseWriter, req *http.Request) {
+		if got := mustLabelValuesFor(req.Context(), "cluster"); strings.Join(got, ",") != "cluster-a" {
+			t.Errorf("unexpected cluster values %v", got)
+		}
+		if got := mustLabelValuesFor(req.Context(), proxyLabel); strings.Join(got, ",") != "team-a" {
+			t.Errorf("unexpected %s values %v", proxyLabel, got)
+		}
+
+		defer func() { recovered = recover() }()
+		_ = MustLabelValues(req.Context())
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://prometheus.example.com/api/v1/query?namespace=team-a", nil)
+	req.Header.Set("X-Cluster", "cluster-a")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if recovered == nil {
+		t.Fatal("expected MustLabelValues() to panic")
+	}
+}
+
 func TestNewRoutesAdditionalLabelValidation(t *testing.T) {
 	m := newMockUpstream(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer m.Close()
 
 	for _, tc := range []struct {
 		name string
-		opt  Option
+		opts []Option
 	}{
 		{
 			name: "empty label",
-			opt:  WithLabel("", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+			opts: []Option{WithEnforcedLabel("", HTTPHeaderEnforcer{Name: "X-Cluster"})},
 		},
 		{
 			name: "missing extractor",
-			opt:  WithLabel("cluster", nil),
+			opts: []Option{WithEnforcedLabel("cluster", nil)},
 		},
 		{
 			name: "duplicate label",
-			opt:  WithLabel(proxyLabel, HTTPHeaderEnforcer{Name: "X-Namespace"}),
+			opts: []Option{WithEnforcedLabel(proxyLabel, HTTPHeaderEnforcer{Name: "X-Namespace"})},
+		},
+		{
+			name: "regex match with several static values",
+			opts: []Option{
+				WithEnforcedLabel("cluster", StaticLabelEnforcer([]string{"cluster-a", "cluster-b"})),
+				WithRegexMatch(),
+			},
+		},
+		{
+			name: "regex match with invalid static regex",
+			opts: []Option{
+				WithEnforcedLabel("cluster", StaticLabelEnforcer([]string{"cluster-(a"})),
+				WithRegexMatch(),
+			},
+		},
+		{
+			name: "regex match with static regex matching the empty string",
+			opts: []Option{
+				WithEnforcedLabel("cluster", StaticLabelEnforcer([]string{".*"})),
+				WithRegexMatch(),
+			},
+		},
+		{
+			name: "regex match with list syntax",
+			opts: []Option{
+				WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster", ParseListSyntax: true}),
+				WithRegexMatch(),
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewRoutes(m.url, proxyLabel, HTTPFormEnforcer{ParameterName: proxyLabel}, tc.opt)
+			_, err := NewRoutes(m.url, proxyLabel, HTTPFormEnforcer{ParameterName: proxyLabel}, tc.opts...)
 			if err == nil {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+// The extractors run one after the other and each of them strips its own
+// parameter from the request, whether it came from the URL or the body.
+func TestQueryMultipleLabelParametersAcrossURLAndPostBody(t *testing.T) {
+	m := newMockUpstream(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if err := req.ParseForm(); err != nil {
+			prometheusAPIError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(req.Form["tenant"]) != 0 || len(req.Form["cluster"]) != 0 {
+			prometheusAPIError(w, "label parameters were forwarded", http.StatusInternalServerError)
+			return
+		}
+		if got := req.PostForm.Get(queryParam); got != `up{cluster="cluster-a",tenant="team-a"}` {
+			prometheusAPIError(w, fmt.Sprintf("unexpected query %q", got), http.StatusInternalServerError)
+			return
+		}
+		w.Write(okResponse)
+	}))
+	defer m.Close()
+
+	r, err := NewRoutes(
+		m.url,
+		"tenant",
+		HTTPFormEnforcer{ParameterName: "tenant"},
+		WithEnforcedLabel("cluster", HTTPFormEnforcer{ParameterName: "cluster"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := url.Values{queryParam: {"up"}, "cluster": {"cluster-a"}}.Encode()
+	req := httptest.NewRequest(http.MethodPost, "http://prometheus.example.com/api/v1/query?tenant=team-a", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 }
 
@@ -208,7 +343,7 @@ func TestQueryMultipleLabels(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -241,7 +376,7 @@ func TestQueryMultipleLabelParameters(t *testing.T) {
 		m.url,
 		"tenant",
 		HTTPFormEnforcer{ParameterName: "tenant"},
-		WithLabel("cluster", HTTPFormEnforcer{ParameterName: "cluster"}),
+		WithEnforcedLabel("cluster", HTTPFormEnforcer{ParameterName: "cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -278,7 +413,7 @@ func TestQueryMultipleLabelParametersInPostBody(t *testing.T) {
 		m.url,
 		"tenant",
 		HTTPFormEnforcer{ParameterName: "tenant"},
-		WithLabel("cluster", HTTPFormEnforcer{ParameterName: "cluster"}),
+		WithEnforcedLabel("cluster", HTTPFormEnforcer{ParameterName: "cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -309,7 +444,7 @@ func TestQueryMultipleLabelsRequiresEveryValue(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -333,7 +468,7 @@ func TestQueryMultipleLabelsWithMultipleValues(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -361,7 +496,7 @@ func TestQueryMultipleLabelsValidatesEveryRegex(t *testing.T) {
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
 		WithRegexMatch(),
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -388,7 +523,7 @@ func TestQueryMultipleLabelsErrorOnReplace(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 		WithErrorOnReplace(),
 	)
 	if err != nil {
@@ -414,7 +549,7 @@ func TestMatchMultipleLabels(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

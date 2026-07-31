@@ -644,7 +644,7 @@ func TestCreateSilenceMultipleLabels(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -682,7 +682,7 @@ func TestDeleteSilenceRequiresEveryLabel(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -709,7 +709,7 @@ func TestSilencesRejectMultipleValuesForAdditionalLabel(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

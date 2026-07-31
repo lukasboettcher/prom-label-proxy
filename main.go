@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"syscall"
 
@@ -238,21 +237,6 @@ func main() {
 	}
 
 	if regexMatch {
-		if len(labelValues) > 0 {
-			if len(labelValues) > 1 {
-				fatal("Regex match is limited to one label value")
-			}
-
-			compiledRegex, err := regexp.Compile(labelValues[0])
-			if err != nil {
-				fatal("Invalid regexp", "error", err)
-			}
-
-			if compiledRegex.MatchString("") {
-				fatal("Regex should not match empty string")
-			}
-		}
-
 		opts = append(opts, injectproxy.WithRegexMatch())
 	}
 

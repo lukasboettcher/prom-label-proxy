@@ -139,7 +139,7 @@ func TestGetAlertsMultipleLabels(t *testing.T) {
 		m.url,
 		"namespace",
 		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
+		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
