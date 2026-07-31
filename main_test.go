@@ -17,82 +17,91 @@ import "testing"
 
 func TestValidateLabelFlags(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		labels      []string
-		queryParams []string
-		headerNames []string
-		labelValues []string
-		wantErr     string
+		name                 string
+		configFile           string
+		label                string
+		queryParam           string
+		headerName           string
+		labelValues          []string
+		headerUsesListSyntax bool
+
+		wantErr string
 	}{
 		{
-			name:        "single query parameter",
-			labels:      []string{"namespace"},
-			queryParams: []string{"namespace"},
+			name:  "label only",
+			label: "namespace",
 		},
 		{
-			name:        "multiple query parameters",
-			labels:      []string{"namespace", "cluster"},
-			queryParams: []string{"namespace", "cluster"},
+			name:       "label and query parameter",
+			label:      "namespace",
+			queryParam: "namespace",
 		},
 		{
-			name:        "multiple headers",
-			labels:      []string{"namespace", "cluster"},
-			headerNames: []string{"X-Namespace", "X-Cluster"},
+			name:       "label and header",
+			label:      "namespace",
+			headerName: "X-Namespace",
 		},
 		{
 			name:        "multiple static values for one label",
-			labels:      []string{"namespace"},
+			label:       "namespace",
 			labelValues: []string{"team-a", "team-b"},
+		},
+		{
+			name:       "config file only",
+			configFile: "config.yaml",
 		},
 		{
 			name:    "missing label",
 			wantErr: "-label flag cannot be empty",
 		},
 		{
-			name:    "empty label",
-			labels:  []string{"namespace", ""},
-			wantErr: "-label flag cannot be empty",
-		},
-		{
-			name:    "duplicate label",
-			labels:  []string{"namespace", "namespace"},
-			wantErr: `-label "namespace" is configured more than once`,
+			name:       "mixed dynamic sources",
+			label:      "namespace",
+			queryParam: "namespace",
+			headerName: "X-Namespace",
+			wantErr:    "at most one of -query-param, -header-name and -label-value must be set",
 		},
 		{
 			name:        "static and query parameter sources",
-			labels:      []string{"namespace"},
-			queryParams: []string{"namespace"},
+			label:       "namespace",
+			queryParam:  "namespace",
 			labelValues: []string{"team-a"},
-			wantErr:     "-label-value cannot be combined with -query-param or -header-name",
+			wantErr:     "at most one of -query-param, -header-name and -label-value must be set",
 		},
 		{
-			name:        "static values for multiple labels",
-			labels:      []string{"namespace", "cluster"},
+			name:        "static and header sources",
+			label:       "namespace",
+			headerName:  "X-Namespace",
 			labelValues: []string{"team-a"},
-			wantErr:     "-label-value cannot be used with multiple -label flags",
+			wantErr:     "at most one of -query-param, -header-name and -label-value must be set",
 		},
 		{
-			name:        "mixed dynamic sources",
-			labels:      []string{"namespace"},
-			queryParams: []string{"namespace"},
-			headerNames: []string{"X-Namespace"},
-			wantErr:     "-query-param and -header-name cannot be combined",
+			name:       "config file and label",
+			configFile: "config.yaml",
+			label:      "namespace",
+			wantErr:    "-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax",
 		},
 		{
-			name:        "query parameter count mismatch",
-			labels:      []string{"namespace", "cluster"},
-			queryParams: []string{"namespace"},
-			wantErr:     "the number of -query-param flags must match the number of -label flags",
+			name:       "config file and query parameter",
+			configFile: "config.yaml",
+			queryParam: "namespace",
+			wantErr:    "-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax",
 		},
 		{
-			name:        "header count mismatch",
-			labels:      []string{"namespace", "cluster"},
-			headerNames: []string{"X-Namespace"},
-			wantErr:     "the number of -header-name flags must match the number of -label flags",
+			name:        "config file and static values",
+			configFile:  "config.yaml",
+			labelValues: []string{"team-a"},
+			wantErr:     "-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax",
+		},
+		{
+			name:                 "config file and header list syntax",
+			configFile:           "config.yaml",
+			headerUsesListSyntax: true,
+			wantErr:              "-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateLabelFlags(tc.labels, tc.queryParams, tc.headerNames, tc.labelValues)
+			err := validateLabelFlags(tc.configFile, tc.label, tc.queryParam, tc.headerName, tc.labelValues, tc.headerUsesListSyntax)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

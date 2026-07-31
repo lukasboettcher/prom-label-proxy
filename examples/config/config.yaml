@@ -1,0 +1,17 @@
+# Example prom-label-proxy configuration enforcing several labels.
+# Pass it with: prom-label-proxy -config-file config.yaml ...
+#
+# Every label declares exactly one value source: header, query_param or values.
+labels:
+  - name: tenant
+    header:
+      name: X-Tenant
+      # Parse every header line as a comma-separated list of values.
+      uses_list_syntax: true
+
+  - name: cluster
+    query_param: cluster
+
+  - name: environment
+    values:
+      - production

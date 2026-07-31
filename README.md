@@ -120,21 +120,35 @@ You can provide multiple values for the label using several HTTP headers:
 {"status":"success","data":{"resultType":"vector","result":[]}}%
 ```
 
-To enforce multiple labels, repeat `-label` and `-header-name`. Labels and
-headers are paired in the order they are provided:
+To enforce more than one label, use the `-config-file` flag. It points to a YAML
+file declaring every enforced label and where its values come from. Each label
+declares exactly one of `header`, `query_param` or `values`:
+
+```yaml
+labels:
+  - name: tenant
+    header:
+      name: X-Tenant
+      # Parse every header line as a comma-separated list of values.
+      uses_list_syntax: true
+  - name: cluster
+    query_param: cluster
+  - name: environment
+    values:
+      - production
+```
 
 ```
 prom-label-proxy \
-   -label tenant -header-name X-Tenant \
-   -label cluster -header-name X-Cluster \
-   -label environment -header-name X-Environment \
+   -config-file config.yaml \
    -upstream http://demo.do.prometheus.io:9090 \
    -insecure-listen-address 127.0.0.1:8080
 ```
 
-The same positional pairing applies when repeating `-query-param` instead of
-`-header-name`. Every configured header or query parameter must be present in
-the request. Existing single-label configurations remain unchanged.
+Every configured header or query parameter must be present in the request,
+otherwise the proxy returns `400 Bad Request`. `-config-file` can't be combined
+with `-label`, `-query-param`, `-header-name`, `-label-value` or
+`-header-uses-list-syntax`.
 
 A last option is to provide a static value for the label:
 
@@ -160,8 +174,6 @@ prom-label-proxy \
 ```
 
 `prom-label-proxy` will enforce the `tenant=~"prometheus|alertmanager"` label selector in all requests.
-Repeated `-label-value` flags continue to define multiple allowed values for a
-single label.
 
 You can match the label value using a regular expression with the `-regex-match` option. For example:
 

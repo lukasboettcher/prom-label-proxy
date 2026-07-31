@@ -1,3 +1,7 @@
+## Unreleased
+
+* [FEATURE] Add `-config-file` flag to enforce several labels at once, each label declaring its own value source (HTTP header, query parameter or static values). #400
+
 ## 0.15.0 / 2026-07-30
 
 * [FEATURE] Add `-rewrite-host-header-to` flag to override the `Host` header in the requests forwarded to upstream (the proxy also adds the `X-Forwarded-Host` and `X-Forwarded-Proto` headers). #383

@@ -394,7 +394,16 @@ func NewRoutes(upstream *url.URL, label string, extractLabeler ExtractLabeler, o
 		o.apply(&opt)
 	}
 
-	labelConfigs := append([]labelConfig{{name: label, extractLabeler: extractLabeler}}, opt.labels...)
+	// label and extractLabeler are optional when the labels are configured
+	// with WithLabel() or WithConfig().
+	labelConfigs := opt.labels
+	if label != "" || extractLabeler != nil {
+		labelConfigs = append([]labelConfig{{name: label, extractLabeler: extractLabeler}}, opt.labels...)
+	}
+
+	if len(labelConfigs) == 0 {
+		return nil, errors.New("at least one label must be configured")
+	}
 
 	seenLabels := make(map[string]struct{}, len(labelConfigs))
 	for _, config := range labelConfigs {
