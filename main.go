@@ -60,52 +60,6 @@ func fatal(msg string, args ...any) {
 	os.Exit(1)
 }
 
-// validateLabelFlags checks that the label sources are configured
-// consistently. Enforcing several labels requires -config-file which is
-// mutually exclusive with the single-label flags.
-func validateLabelFlags(configFile, label, queryParam, headerName string, labelValues []string, headerUsesListSyntax bool) error {
-	if configFile != "" {
-		if label != "" || queryParam != "" || headerName != "" || len(labelValues) > 0 || headerUsesListSyntax {
-			return errors.New("-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax")
-		}
-
-		return nil
-	}
-
-	if label == "" {
-		return errors.New("-label flag cannot be empty")
-	}
-
-	if len(labelValues) > 0 {
-		if queryParam != "" || headerName != "" {
-			return errors.New("at most one of -query-param, -header-name and -label-value must be set")
-		}
-	} else if queryParam != "" && headerName != "" {
-		return errors.New("at most one of -query-param, -header-name and -label-value must be set")
-	}
-
-	return nil
-}
-
-// validateRegexValues checks that static label values can be used as label
-// matcher regular expressions.
-func validateRegexValues(values []string) error {
-	if len(values) > 1 {
-		return errors.New("regex match is limited to one label value")
-	}
-
-	compiledRegex, err := regexp.Compile(values[0])
-	if err != nil {
-		return fmt.Errorf("invalid regexp: %w", err)
-	}
-
-	if compiledRegex.MatchString("") {
-		return errors.New("regex should not match empty string")
-	}
-
-	return nil
-}
-
 func main() {
 	var (
 		insecureListenAddress           string
@@ -147,7 +101,7 @@ func main() {
 	flagset.StringVar(&upstreamServerName, "upstream-server-name", "", "The server name used to verify the upstream's TLS certificate. Useful when the upstream URL host does not match the certificate.")
 	flagset.StringVar(&label, "label", "", "The label name to enforce in all proxied PromQL queries.")
 	flagset.Var(&labelValues, "label-value", "A fixed label value to enforce in all proxied PromQL queries. At most one of -query-param, -header-name and -label-value should be given. It can be repeated in which case the proxy will enforce the union of values.")
-	flagset.StringVar(&configFile, "config-file", "", "Path to a YAML file declaring the labels to enforce and where their values come from. Use it to enforce more than one label. It can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax.")
+	flagset.StringVar(&configFile, "config-file", "", "Path to the YAML file declaring the labels to enforce and where their values come from. It is required to enforce more than one label and it can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax.")
 	flagset.BoolVar(&enableLabelAPIs, "enable-label-apis", false, "When specified proxy allows to inject label to label APIs like /api/v1/labels and /api/v1/label/<name>/values. "+
 		"NOTE: Enable with care because filtering by matcher is not implemented in older versions of Prometheus (>= v2.24.0 required) and Thanos (>= v0.18.0 required, >= v0.23.0 recommended). If enabled and "+
 		"any labels endpoint does not support selectors, the injected matcher will have no effect.")
@@ -191,16 +145,27 @@ func main() {
 
 	//nolint: errcheck // Parse() will exit on error.
 	flagset.Parse(os.Args[1:])
-
 	logger := promslog.New(promslogConfig)
 	slog.SetDefault(logger)
 
-	if err := validateLabelFlags(configFile, label, queryParam, headerName, labelValues, headerUsesListSyntax); err != nil {
-		fatal(err.Error())
+	if configFile != "" {
+		if label != "" || queryParam != "" || headerName != "" || len(labelValues) > 0 || headerUsesListSyntax {
+			fatal("-config-file can't be combined with -label, -query-param, -header-name, -label-value or -header-uses-list-syntax")
+		}
+	} else if label == "" {
+		fatal("-label flag cannot be empty")
 	}
 
 	if len(labelValues) == 0 && queryParam == "" && headerName == "" {
 		queryParam = label
+	}
+
+	if len(labelValues) > 0 {
+		if queryParam != "" || headerName != "" {
+			fatal("at most one of -query-param, -header-name and -label-value must be set")
+		}
+	} else if queryParam != "" && headerName != "" {
+		fatal("at most one of -query-param, -header-name and -label-value must be set")
 	}
 
 	upstreamURL, err := url.Parse(upstream)
@@ -223,6 +188,15 @@ func main() {
 	}
 
 	opts := []injectproxy.Option{injectproxy.WithPrometheusRegistry(reg)}
+	if configFile != "" {
+		cfg, err := injectproxy.LoadConfig(configFile)
+		if err != nil {
+			fatal("Failed to load the configuration file", "error", err)
+		}
+
+		opts = append(opts, injectproxy.WithConfig(*cfg))
+	}
+
 	if upstreamCaCert != "" {
 		opts = append(opts, injectproxy.WithUpstreamCaCert(upstreamCaCert))
 	}
@@ -263,40 +237,19 @@ func main() {
 		opts = append(opts, injectproxy.WithLabelMatchersForRulesAPI())
 	}
 
-	var (
-		labelConfigs   []injectproxy.LabelConfig
-		extractLabeler injectproxy.ExtractLabeler
-	)
-
-	if configFile != "" {
-		cfg, err := injectproxy.LoadConfig(configFile)
-		if err != nil {
-			fatal("Failed to load the configuration file", "error", err)
-		}
-
-		labelConfigs = cfg.Labels
-		opts = append(opts, injectproxy.WithConfig(*cfg))
-	} else {
-		switch {
-		case len(labelValues) > 0:
-			extractLabeler = injectproxy.StaticLabelEnforcer(labelValues)
-		case headerName != "":
-			extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
-		default:
-			extractLabeler = injectproxy.HTTPFormEnforcer{ParameterName: queryParam}
-		}
-
-		labelConfigs = []injectproxy.LabelConfig{{Name: label, Values: labelValues}}
-	}
-
 	if regexMatch {
-		for _, l := range labelConfigs {
-			if len(l.Values) == 0 {
-				continue
+		if len(labelValues) > 0 {
+			if len(labelValues) > 1 {
+				fatal("Regex match is limited to one label value")
 			}
 
-			if err := validateRegexValues(l.Values); err != nil {
-				fatal("Invalid static label value", "label", l.Name, "error", err)
+			compiledRegex, err := regexp.Compile(labelValues[0])
+			if err != nil {
+				fatal("Invalid regexp", "error", err)
+			}
+
+			if compiledRegex.MatchString("") {
+				fatal("Regex should not match empty string")
 			}
 		}
 
@@ -317,6 +270,16 @@ func main() {
 
 	if promQLBinopFillModifiers {
 		opts = append(opts, injectproxy.WithPromqlBinopFillModifiers())
+	}
+
+	var extractLabeler injectproxy.ExtractLabeler
+	switch {
+	case len(labelValues) > 0:
+		extractLabeler = injectproxy.StaticLabelEnforcer(labelValues)
+	case queryParam != "":
+		extractLabeler = injectproxy.HTTPFormEnforcer{ParameterName: queryParam}
+	case headerName != "":
+		extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
 	}
 
 	var g run.Group
