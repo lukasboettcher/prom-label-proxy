@@ -88,34 +88,9 @@ labels:
 			in:      "labels:\n  - name: namespace\n    header:\n      name: \"\"\n",
 			wantErr: true,
 		},
-		{
-			name:    "empty static value",
-			in:      "labels:\n  - name: namespace\n    values: [\"  \"]\n",
-			wantErr: true,
-		},
-		{
-			name:    "duplicated label",
-			in:      "labels:\n  - name: namespace\n    query_param: ns\n  - name: namespace\n    query_param: ns2\n",
-			wantErr: true,
-		},
-		{
-			name:    "duplicated query parameter",
-			in:      "labels:\n  - name: namespace\n    query_param: ns\n  - name: cluster\n    query_param: ns\n",
-			wantErr: true,
-		},
-		{
-			name: "duplicated header",
-			in:   "labels:\n  - name: namespace\n    header:\n      name: X-Scope\n  - name: cluster\n    header:\n      name: X-Scope\n",
-			want: &Config{
-				Labels: []LabelConfig{
-					{Name: "namespace", Header: &HeaderConfig{Name: "X-Scope"}},
-					{Name: "cluster", Header: &HeaderConfig{Name: "X-Scope"}},
-				},
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseConfig([]byte(tc.in))
+			got, err := parseConfig([]byte(tc.in))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got none")
@@ -130,13 +105,6 @@ labels:
 				t.Fatalf("expected %+v, got %+v", tc.want, got)
 			}
 		})
-	}
-}
-
-func TestValidateRejectsInvalidLabelName(t *testing.T) {
-	cfg := Config{Labels: []LabelConfig{{Name: "invalid\xffname", QueryParam: "ns"}}}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error, got none")
 	}
 }
 
@@ -159,11 +127,11 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestWithConfig(t *testing.T) {
+func TestConfigLabelEnforcers(t *testing.T) {
 	m := newMockUpstream(checkQueryHandler("", queryParam, `up{cluster="cluster-a",namespace="team-a",tenant="acme"}`))
 	defer m.Close()
 
-	cfg, err := ParseConfig([]byte(`
+	cfg, err := parseConfig([]byte(`
 labels:
   - name: namespace
     header:
@@ -177,7 +145,7 @@ labels:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	r, err := NewRoutes(m.url, "", nil, WithConfig(*cfg))
+	r, err := NewRoutesWithLabelers(m.url, cfg.LabelEnforcers())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

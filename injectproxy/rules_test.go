@@ -827,12 +827,7 @@ func TestAlertsMultipleLabels(t *testing.T) {
 	}))
 	defer m.Close()
 
-	r, err := NewRoutes(
-		m.url,
-		"namespace",
-		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
-	)
+	r, err := NewRoutesWithLabelers(m.url, multiLabelEnforcers)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -889,13 +884,7 @@ func TestRulesMultipleLabelsWithActiveAlerts(t *testing.T) {
 	}))
 	defer m.Close()
 
-	r, err := NewRoutes(
-		m.url,
-		"namespace",
-		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
-		WithActiveAlerts(),
-	)
+	r, err := NewRoutesWithLabelers(m.url, multiLabelEnforcers, WithActiveAlerts())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -931,13 +920,7 @@ func TestRulesMultipleLabelMatchers(t *testing.T) {
 	m := newMockUpstream(validRulesWithLabelMatchers(`{namespace="team-a",cluster="cluster-a"}`))
 	defer m.Close()
 
-	r, err := NewRoutes(
-		m.url,
-		"namespace",
-		HTTPHeaderEnforcer{Name: "X-Namespace"},
-		WithEnforcedLabel("cluster", HTTPHeaderEnforcer{Name: "X-Cluster"}),
-		WithLabelMatchersForRulesAPI(),
-	)
+	r, err := NewRoutesWithLabelers(m.url, multiLabelEnforcers, WithLabelMatchersForRulesAPI())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

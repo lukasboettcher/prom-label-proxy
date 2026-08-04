@@ -16,7 +16,6 @@ package injectproxy
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -296,10 +295,8 @@ func (ms PromQLEnforcer) EnforceMatchers(targets []*labels.Matcher) ([]*labels.M
 		res = append(res, target)
 	}
 
-	// Iterate in a deterministic order so that the injected matchers are
-	// always rendered the same way.
-	for _, name := range slices.Sorted(maps.Keys(ms.labelMatchers)) {
-		res = append(res, ms.labelMatchers[name])
+	for _, enforcedMatcher := range ms.labelMatchers {
+		res = append(res, enforcedMatcher)
 	}
 
 	return res, nil

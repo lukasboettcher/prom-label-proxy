@@ -20,9 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
-	"github.com/prometheus/common/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -31,7 +29,7 @@ type Config struct {
 	Labels []LabelConfig `yaml:"labels"`
 }
 
-// LabelConfig declares a single enforced label and the source of its values.
+// LabelConfig declares an enforced label and where its values come from.
 // Exactly one of Header, QueryParam or Values must be set.
 type LabelConfig struct {
 	Name       string        `yaml:"name"`
@@ -42,9 +40,8 @@ type LabelConfig struct {
 
 // HeaderConfig declares the HTTP header carrying the label values.
 type HeaderConfig struct {
-	Name string `yaml:"name"`
-	// UsesListSyntax parses every header line as a comma-separated list of values.
-	UsesListSyntax bool `yaml:"uses_list_syntax,omitempty"`
+	Name           string `yaml:"name"`
+	UsesListSyntax bool   `yaml:"uses_list_syntax,omitempty"`
 }
 
 // LoadConfig reads and validates the configuration from the given file.
@@ -54,7 +51,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("can't read the configuration file: %w", err)
 	}
 
-	cfg, err := ParseConfig(b)
+	cfg, err := parseConfig(b)
 	if err != nil {
 		return nil, fmt.Errorf("invalid configuration file %q: %w", path, err)
 	}
@@ -62,8 +59,7 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// ParseConfig unmarshals and validates the YAML configuration.
-func ParseConfig(b []byte) (*Config, error) {
+func parseConfig(b []byte) (*Config, error) {
 	var cfg Config
 
 	dec := yaml.NewDecoder(bytes.NewReader(b))
@@ -76,77 +72,54 @@ func ParseConfig(b []byte) (*Config, error) {
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	if len(cfg.Labels) == 0 {
+		return nil, errors.New("at least one label must be configured")
+	}
+
+	for i, l := range cfg.Labels {
+		if err := l.validate(); err != nil {
+			return nil, fmt.Errorf("labels[%d]: %w", i, err)
+		}
 	}
 
 	return &cfg, nil
 }
 
-// Validate returns an error if the configuration isn't valid.
-func (c Config) Validate() error {
-	if len(c.Labels) == 0 {
-		return errors.New("at least one label must be configured")
+func (l LabelConfig) validate() error {
+	if l.Name == "" {
+		return errors.New("the label name can't be empty")
 	}
 
-	seen := make(map[string]struct{}, len(c.Labels))
-	seenQueryParams := make(map[string]struct{}, len(c.Labels))
-	for i, l := range c.Labels {
-		if err := l.validate(); err != nil {
-			return fmt.Errorf("labels[%d]: %w", i, err)
-		}
+	var sources int
+	if l.Header != nil {
+		sources++
+	}
+	if l.QueryParam != "" {
+		sources++
+	}
+	if len(l.Values) > 0 {
+		sources++
+	}
 
-		if _, found := seen[l.Name]; found {
-			return fmt.Errorf("labels[%d]: label %q is configured more than once", i, l.Name)
-		}
-		seen[l.Name] = struct{}{}
+	if sources != 1 {
+		return fmt.Errorf("exactly one of header, query_param or values must be set for label %q, got %d", l.Name, sources)
+	}
 
-		if l.QueryParam == "" {
-			continue
-		}
-
-		// Sharing a query parameter between labels is rejected because the
-		// extractors strip the parameter from the proxied request as they run.
-		if _, found := seenQueryParams[l.QueryParam]; found {
-			return fmt.Errorf("labels[%d]: query parameter %q is used by more than one label", i, l.QueryParam)
-		}
-		seenQueryParams[l.QueryParam] = struct{}{}
+	if l.Header != nil && l.Header.Name == "" {
+		return fmt.Errorf("the header name can't be empty for label %q", l.Name)
 	}
 
 	return nil
 }
 
-func (l LabelConfig) validate() error {
-	if !model.UTF8Validation.IsValidLabelName(l.Name) {
-		return fmt.Errorf("invalid label name %q", l.Name)
+// LabelEnforcers returns the label enforcers declared by the configuration.
+func (c Config) LabelEnforcers() []LabelEnforcer {
+	enforcers := make([]LabelEnforcer, 0, len(c.Labels))
+	for _, l := range c.Labels {
+		enforcers = append(enforcers, LabelEnforcer{Label: l.Name, ExtractLabeler: l.extractLabeler()})
 	}
 
-	var sources []string
-	if l.Header != nil {
-		sources = append(sources, "header")
-	}
-	if l.QueryParam != "" {
-		sources = append(sources, "query_param")
-	}
-	if len(l.Values) > 0 {
-		sources = append(sources, "values")
-	}
-
-	if len(sources) != 1 {
-		return fmt.Errorf("exactly one of header, query_param or values must be set for label %q, got %d", l.Name, len(sources))
-	}
-
-	if l.Header != nil && l.Header.Name == "" {
-		return fmt.Errorf("the header name must be set for label %q", l.Name)
-	}
-
-	for _, v := range l.Values {
-		if strings.TrimSpace(v) == "" {
-			return fmt.Errorf("values must not be empty for label %q", l.Name)
-		}
-	}
-
-	return nil
+	return enforcers
 }
 
 func (l LabelConfig) extractLabeler() ExtractLabeler {
@@ -161,13 +134,4 @@ func (l LabelConfig) extractLabeler() ExtractLabeler {
 	default:
 		return HTTPFormEnforcer{ParameterName: l.QueryParam}
 	}
-}
-
-// WithConfig configures the proxy to enforce every label declared in cfg.
-func WithConfig(cfg Config) Option {
-	return optionFunc(func(o *options) {
-		for _, l := range cfg.Labels {
-			o.labels = append(o.labels, enforcedLabel{name: l.Name, extractLabeler: l.extractLabeler()})
-		}
-	})
 }

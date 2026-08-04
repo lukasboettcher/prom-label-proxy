@@ -28,12 +28,12 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/efficientgo/core/merrors"
 	"github.com/metalmatze/signal/server/signalhttp"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
 )
@@ -46,7 +46,7 @@ const (
 type routes struct {
 	upstream *url.URL
 	handler  http.Handler
-	labels   []enforcedLabel
+	labels   []LabelEnforcer
 
 	mux                   http.Handler
 	modifiers             map[string]func(*http.Response) error
@@ -57,7 +57,6 @@ type routes struct {
 }
 
 type options struct {
-	labels                   []enforcedLabel
 	upstreamCaCert           string
 	upstreamClientCertFile   string
 	upstreamClientKeyFile    string
@@ -82,18 +81,6 @@ type optionFunc func(*options)
 
 func (f optionFunc) apply(o *options) {
 	f(o)
-}
-
-type enforcedLabel struct {
-	name           string
-	extractLabeler ExtractLabeler
-}
-
-// WithEnforcedLabel configures an additional label to enforce.
-func WithEnforcedLabel(label string, extractLabeler ExtractLabeler) Option {
-	return optionFunc(func(o *options) {
-		o.labels = append(o.labels, enforcedLabel{name: label, extractLabeler: extractLabeler})
-	})
 }
 
 // WithPrometheusRegistry configures the proxy to use the given registerer.
@@ -172,7 +159,7 @@ func WithLabelMatchersForRulesAPI() Option {
 	})
 }
 
-// WithRegexMatch causes the proxy to handle each label value as a regular expression.
+// WithRegexMatch causes the proxy to handle tenant name as regexp
 func WithRegexMatch() Option {
 	return optionFunc(func(o *options) {
 		o.regexMatch = true
@@ -282,7 +269,7 @@ func (i *instrumentedMux) Handle(pattern string, handler http.Handler) {
 	i.mux.Handle(pattern, i.i.NewHandler(prometheus.Labels{"handler": pattern}, handler))
 }
 
-// ExtractLabeler is an HTTP handler that extracts the label value to be
+// ExtractLabeler is an HTTP handler that extract the label value to be
 // enforced from the HTTP request.  If a valid label value is found, it should
 // store it in the request's context.  Otherwise it should return an error in
 // the HTTP response (usually 400 or 500).
@@ -363,7 +350,7 @@ func (hhe HTTPHeaderEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler {
 }
 
 func (hhe HTTPHeaderEnforcer) getLabelValues(r *http.Request) ([]string, error) {
-	headerValues := slices.Clone(r.Header[hhe.Name])
+	headerValues := r.Header[hhe.Name]
 
 	if hhe.ParseListSyntax {
 		headerValues = trimValues(splitValues(headerValues, ","))
@@ -388,45 +375,39 @@ func (sle StaticLabelEnforcer) ExtractLabel(next http.HandlerFunc) http.Handler 
 	})
 }
 
-// NewRoutes returns a proxy which enforces the configured labels on every
-// request forwarded to the upstream.
-//
-// The label and extractLabeler arguments declare the first enforced label. They
-// may be left empty and nil when the labels are declared with
-// WithEnforcedLabel() or WithConfig() instead.
+// LabelEnforcer associates an enforced label with the source of its values.
+type LabelEnforcer struct {
+	Label          string
+	ExtractLabeler ExtractLabeler
+}
+
 func NewRoutes(upstream *url.URL, label string, extractLabeler ExtractLabeler, opts ...Option) (*routes, error) {
+	return NewRoutesWithLabelers(upstream, []LabelEnforcer{{Label: label, ExtractLabeler: extractLabeler}}, opts...)
+}
+
+// NewRoutesWithLabelers returns a proxy enforcing all the given labels.
+func NewRoutesWithLabelers(upstream *url.URL, enforcedLabels []LabelEnforcer, opts ...Option) (*routes, error) {
 	opt := options{}
 	for _, o := range opts {
 		o.apply(&opt)
 	}
 
-	enforcedLabels := opt.labels
-	if label != "" || extractLabeler != nil {
-		enforcedLabels = append([]enforcedLabel{{name: label, extractLabeler: extractLabeler}}, opt.labels...)
-	}
-
 	if len(enforcedLabels) == 0 {
-		return nil, errors.New("at least one label must be configured")
+		return nil, errors.New("at least one label must be enforced")
 	}
 
 	seenLabels := make(map[string]struct{}, len(enforcedLabels))
 	for _, l := range enforcedLabels {
-		if !model.UTF8Validation.IsValidLabelName(l.name) {
-			return nil, fmt.Errorf("invalid label name %q", l.name)
+		if l.Label == "" {
+			return nil, errors.New("the label name can't be empty")
 		}
-		if l.extractLabeler == nil {
-			return nil, fmt.Errorf("label %q has no value extractor", l.name)
+		if l.ExtractLabeler == nil {
+			return nil, fmt.Errorf("label %q has no value extractor", l.Label)
 		}
-		if _, ok := seenLabels[l.name]; ok {
-			return nil, fmt.Errorf("label %q is configured more than once", l.name)
+		if _, ok := seenLabels[l.Label]; ok {
+			return nil, fmt.Errorf("label %q is enforced more than once", l.Label)
 		}
-		seenLabels[l.name] = struct{}{}
-
-		if opt.regexMatch {
-			if err := validateRegexExtractor(l); err != nil {
-				return nil, err
-			}
-		}
+		seenLabels[l.Label] = struct{}{}
 	}
 
 	if opt.registerer == nil {
@@ -635,31 +616,19 @@ type ctxKey int
 
 const keyLabel ctxKey = iota
 
-// labelValuesKey scopes extracted values to a single enforced label. Using a
-// distinct key per label keeps the context values immutable.
+// labelValuesKey stores the values extracted for a single enforced label.
 type labelValuesKey string
 
-// extractLabels runs every configured extractor in turn. Each ExtractLabeler
-// reports its values through keyLabel (the single-label API kept for backward
-// compatibility) and the wrapper immediately re-keys them by label name.
+// extractLabels chains the extractors of all the enforced labels, storing the
+// values of each label under its own context key.
 func (r *routes) extractLabels(next http.HandlerFunc) http.Handler {
 	var handler http.Handler = next
-
-	if len(r.labels) > 1 {
-		// keyLabel can only hold one label's values. Drop it so that
-		// MustLabelValue(s)() panics instead of silently returning the values
-		// of whichever label happened to be extracted last.
-		last := handler
-		handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			last.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), keyLabel, nil)))
-		})
-	}
 
 	for i := len(r.labels) - 1; i >= 0; i-- {
 		l := r.labels[i]
 		nextHandler := handler
-		handler = l.extractLabeler.ExtractLabel(func(w http.ResponseWriter, req *http.Request) {
-			ctx := withLabelValuesFor(req.Context(), l.name, MustLabelValues(req.Context()))
+		handler = l.ExtractLabeler.ExtractLabel(func(w http.ResponseWriter, req *http.Request) {
+			ctx := context.WithValue(req.Context(), labelValuesKey(l.Label), MustLabelValues(req.Context()))
 			nextHandler.ServeHTTP(w, req.WithContext(ctx))
 		})
 	}
@@ -671,15 +640,17 @@ func (r *routes) extractLabels(next http.HandlerFunc) http.Handler {
 // from the given context.
 // It will panic if no label is found or the value is empty.
 func MustLabelValues(ctx context.Context) []string {
-	values, ok := ctx.Value(keyLabel).([]string)
+	labels, ok := ctx.Value(keyLabel).([]string)
 	if !ok {
 		panic(fmt.Sprintf("can't find the %q value in the context", keyLabel))
 	}
-	if len(values) == 0 {
+	if len(labels) == 0 {
 		panic(fmt.Sprintf("empty %q value in the context", keyLabel))
 	}
 
-	return sortedLabelValues(values)
+	sort.Strings(labels)
+
+	return labels
 }
 
 // MustLabelValue returns the first (alphabetical order) label value previously
@@ -705,15 +676,8 @@ func WithLabelValues(ctx context.Context, labels []string) context.Context {
 	return context.WithValue(ctx, keyLabel, labels)
 }
 
-func withLabelValuesFor(ctx context.Context, label string, values []string) context.Context {
-	return context.WithValue(ctx, labelValuesKey(label), values)
-}
-
-// mustLabelValuesFor returns the sorted values extracted for the given label.
-// The returned slice must not be modified.
-//
-// It panics when the label has no value, which can only happen if the handler
-// wasn't wrapped by extractLabels().
+// mustLabelValuesFor returns the values extracted for the given enforced label.
+// It panics if the handler wasn't wrapped by extractLabels().
 func mustLabelValuesFor(ctx context.Context, label string) []string {
 	values, ok := ctx.Value(labelValuesKey(label)).([]string)
 	if !ok || len(values) == 0 {
@@ -721,13 +685,6 @@ func mustLabelValuesFor(ctx context.Context, label string) []string {
 	}
 
 	return values
-}
-
-func sortedLabelValues(values []string) []string {
-	sorted := slices.Clone(values)
-	slices.Sort(sorted)
-
-	return sorted
 }
 
 func (r *routes) passthrough(w http.ResponseWriter, req *http.Request) {
@@ -818,7 +775,7 @@ func enforceQueryValues(e *PromQLEnforcer, v url.Values) (values string, noQuery
 func (r *routes) newLabelMatchers(ctx context.Context) ([]*labels.Matcher, error) {
 	matchers := make([]*labels.Matcher, 0, len(r.labels))
 	for _, l := range r.labels {
-		matcher, err := r.newLabelMatcherFor(l.name, mustLabelValuesFor(ctx, l.name)...)
+		matcher, err := r.newLabelMatcher(l.Label, mustLabelValuesFor(ctx, l.Label)...)
 		if err != nil {
 			return nil, err
 		}
@@ -828,17 +785,23 @@ func (r *routes) newLabelMatchers(ctx context.Context) ([]*labels.Matcher, error
 	return matchers, nil
 }
 
-func (r *routes) newLabelMatcherFor(label string, vals ...string) (*labels.Matcher, error) {
+func (r *routes) newLabelMatcher(label string, vals ...string) (*labels.Matcher, error) {
 	if r.regexMatch {
 		if len(vals) != 1 {
 			return nil, errors.New("only one label value allowed with regex match")
 		}
 
-		if err := validateRegexValue(label, vals[0]); err != nil {
-			return nil, err
+		re := vals[0]
+		compiledRegex, err := regexp.Compile(re)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex: %w", err)
 		}
 
-		return labels.NewMatcher(labels.MatchRegexp, label, vals[0])
+		if compiledRegex.MatchString("") {
+			return nil, errors.New("regex should not match empty string")
+		}
+
+		return labels.NewMatcher(labels.MatchRegexp, label, re)
 	}
 
 	if len(vals) == 1 {
@@ -850,39 +813,6 @@ func (r *routes) newLabelMatcherFor(label string, vals ...string) (*labels.Match
 	}
 
 	return labels.NewMatcher(labels.MatchRegexp, label, labelValuesToRegexpString(vals))
-}
-
-// validateRegexExtractor reports the extractor configurations that can never
-// produce a valid matcher when the proxy runs with regex match enabled.
-func validateRegexExtractor(l enforcedLabel) error {
-	switch e := l.extractLabeler.(type) {
-	case StaticLabelEnforcer:
-		if len(e) != 1 {
-			return fmt.Errorf("label %q: only one label value allowed with regex match", l.name)
-		}
-
-		return validateRegexValue(l.name, e[0])
-
-	case HTTPHeaderEnforcer:
-		if e.ParseListSyntax {
-			return fmt.Errorf("label %q: the list syntax can't be combined with regex match", l.name)
-		}
-	}
-
-	return nil
-}
-
-func validateRegexValue(label, value string) error {
-	compiledRegex, err := regexp.Compile(value)
-	if err != nil {
-		return fmt.Errorf("label %q: invalid regex: %w", label, err)
-	}
-
-	if compiledRegex.MatchString("") {
-		return fmt.Errorf("label %q: regex should not match empty string", label)
-	}
-
-	return nil
 }
 
 // matcher modifies all the match[] HTTP parameters to match on the enforced labels.

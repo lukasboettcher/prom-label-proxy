@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -187,15 +188,6 @@ func main() {
 	}
 
 	opts := []injectproxy.Option{injectproxy.WithPrometheusRegistry(reg)}
-	if configFile != "" {
-		cfg, err := injectproxy.LoadConfig(configFile)
-		if err != nil {
-			fatal("Failed to load the configuration file", "error", err)
-		}
-
-		opts = append(opts, injectproxy.WithConfig(*cfg))
-	}
-
 	if upstreamCaCert != "" {
 		opts = append(opts, injectproxy.WithUpstreamCaCert(upstreamCaCert))
 	}
@@ -237,6 +229,21 @@ func main() {
 	}
 
 	if regexMatch {
+		if len(labelValues) > 0 {
+			if len(labelValues) > 1 {
+				fatal("Regex match is limited to one label value")
+			}
+
+			compiledRegex, err := regexp.Compile(labelValues[0])
+			if err != nil {
+				fatal("Invalid regexp", "error", err)
+			}
+
+			if compiledRegex.MatchString("") {
+				fatal("Regex should not match empty string")
+			}
+		}
+
 		opts = append(opts, injectproxy.WithRegexMatch())
 	}
 
@@ -256,20 +263,32 @@ func main() {
 		opts = append(opts, injectproxy.WithPromqlBinopFillModifiers())
 	}
 
-	var extractLabeler injectproxy.ExtractLabeler
-	switch {
-	case len(labelValues) > 0:
-		extractLabeler = injectproxy.StaticLabelEnforcer(labelValues)
-	case queryParam != "":
-		extractLabeler = injectproxy.HTTPFormEnforcer{ParameterName: queryParam}
-	case headerName != "":
-		extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
+	var enforcedLabels []injectproxy.LabelEnforcer
+	if configFile != "" {
+		cfg, err := injectproxy.LoadConfig(configFile)
+		if err != nil {
+			fatal("Failed to load the configuration file", "error", err)
+		}
+
+		enforcedLabels = cfg.LabelEnforcers()
+	} else {
+		var extractLabeler injectproxy.ExtractLabeler
+		switch {
+		case len(labelValues) > 0:
+			extractLabeler = injectproxy.StaticLabelEnforcer(labelValues)
+		case queryParam != "":
+			extractLabeler = injectproxy.HTTPFormEnforcer{ParameterName: queryParam}
+		case headerName != "":
+			extractLabeler = injectproxy.HTTPHeaderEnforcer{Name: http.CanonicalHeaderKey(headerName), ParseListSyntax: headerUsesListSyntax}
+		}
+
+		enforcedLabels = []injectproxy.LabelEnforcer{{Label: label, ExtractLabeler: extractLabeler}}
 	}
 
 	var g run.Group
 	{
 		// Run the insecure HTTP server.
-		routes, err := injectproxy.NewRoutes(upstreamURL, label, extractLabeler, opts...)
+		routes, err := injectproxy.NewRoutesWithLabelers(upstreamURL, enforcedLabels, opts...)
 		if err != nil {
 			fatal("Failed to create injectproxy Routes", "error", err)
 		}
